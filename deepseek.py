@@ -28,6 +28,13 @@ class DeepSeekAPI:
         self.model = config.model
 
     def chat(self, message, model=None, stream=False, prompt=None, history=None):
+        """发送消息给 AI。
+
+        Args:
+            message: 纯文本字符串（向后兼容）或多模态 content 数组
+                     [{"type": "text", "text": "..."},
+                      {"type": "image_url", "image_url": {"url": "data:..."}}]
+        """
         if stream:
             log("DeepSeekAPI 当前封装未启用流式响应，已按非流式请求处理", "WARN")
         if model is None:
@@ -48,7 +55,9 @@ class DeepSeekAPI:
                 t = h.get("time", "")
                 content = f"[{t}] {text}" if t else text
                 messages.append({"role": role, "content": content})
-        messages.append({"role": "user", "content": message})
+        # 支持纯文本字符串 和 多模态 content 数组
+        user_content = message if isinstance(message, (str, list)) else str(message)
+        messages.append({"role": "user", "content": user_content})
 
         payload = {
             "model": model,

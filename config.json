@@ -1,0 +1,11 @@
+{
+  "provider": "deepseek",
+  "providers": {
+    "deepseek": {
+      "api_key": "ms-534af057-bda0-40ca-a7ac-3470cecf70a1",
+      "base_url": "https://api-inference.modelscope.cn/v1/",
+      "model": "Qwen/Qwen3.5-35B-A3B",
+      "prompt": "你是一个有帮助的AI助手，请用中文简洁地回复。字数尽量少一些"
+    }
+  }
+}

@@ -12,6 +12,13 @@ from urllib.parse import quote
 from concurrent.futures import ThreadPoolExecutor
 from dusapi import DusAPI, DusConfig
 from deepseek import DeepSeekAPI, DeepSeekConfig
+from media import (
+    download_and_decrypt,
+    process_image_for_vision,
+    build_image_block_openai,
+    build_image_block_anthropic,
+    silk_to_wav,
+)
 
 executor = ThreadPoolExecutor(max_workers=4)
 ai = None  # 启动时从配置文件加载后初始化
@@ -605,6 +612,101 @@ async def login_with_qrcode(session, base_url=BASE_URL):
             raise RuntimeError("二维码多次失效或登录失败，请稍后重试。")
 
 
+async def build_ai_content(session, item_list, provider):
+    """解析消息的 item_list，构建传给 AI 的 content。
+
+    遍历 item_list 中的所有 item，提取文本、图片、语音，
+    构建纯文本字符串（向后兼容）或多模态 content 数组。
+
+    Args:
+        session: aiohttp session
+        item_list: 微信消息的 item_list 数组
+        provider: "deepseek" 或 "dusapi"
+
+    Returns:
+        str: 纯文本（无图片时）
+        list[dict]: 多模态 content 数组（有图片时）
+    """
+    texts = []
+    image_blocks = []
+    voice_texts = []
+
+    for item in (item_list or []):
+        t = item.get("type")
+        if t == 1:
+            # 文本
+            txt = item.get("text_item", {}).get("text", "")
+            if txt:
+                texts.append(txt)
+
+        elif t == 2:
+            # 图片 / 表情包
+            img = item.get("image_item", {})
+            media_info = img.get("media", {})
+            full_url = media_info.get("full_url", "") or img.get("full_url", "")
+            aes_key = media_info.get("aes_key", "") or img.get("aeskey", "")
+
+            if full_url and aes_key:
+                print(f"[多媒体] 下载图片: {full_url[:80]}...")
+                plain = await download_and_decrypt(session, full_url, aes_key)
+                if plain:
+                    try:
+                        mime, b64 = process_image_for_vision(plain)
+                        if provider == "dusapi":
+                            image_blocks.append(build_image_block_anthropic(mime, b64))
+                        else:
+                            image_blocks.append(build_image_block_openai(mime, b64))
+                        print(f"[多媒体] 图片处理成功 ({mime}, {len(b64)} chars)")
+                    except Exception as e:
+                        print(f"[多媒体] 图片处理失败: {e}")
+                        texts.append("[收到一张图片，但解码失败]")
+                else:
+                    texts.append("[收到一张图片，但下载或解密失败]")
+            else:
+                texts.append("[收到一张图片，但缺少 CDN 信息]")
+
+        elif t == 3:
+            # 语音
+            voice = item.get("voice_item", {})
+            builtin_text = voice.get("text", "").strip()
+            if builtin_text:
+                voice_texts.append(f"[语音] {builtin_text}")
+            else:
+                # 尝试下载 SILK → 转 WAV → 此处暂不做自动 STT
+                # 用户可后期接入 Whisper API
+                full_url = voice.get("media", {}).get("full_url", "")
+                aes_key = voice.get("media", {}).get("aes_key", "")
+                if full_url and aes_key:
+                    plain = await download_and_decrypt(session, full_url, aes_key)
+                    if plain:
+                        wav = silk_to_wav(plain)
+                        if wav:
+                            voice_texts.append("[语音] (SILK 已解码为 WAV，可接入 STT 识别)")
+                        else:
+                            voice_texts.append("[语音] (SILK 解码失败，请安装 pilk)")
+                    else:
+                        voice_texts.append("[语音] (下载失败)")
+                else:
+                    voice_texts.append("[收到一条语音消息]")
+
+    # --- 拼接最终 content ---
+    full_text = " ".join(texts)
+    if voice_texts:
+        voice_prefix = "\n".join(voice_texts)
+        full_text = f"{full_text}\n{voice_prefix}" if full_text else voice_prefix
+
+    # 无图片 → 纯文本
+    if not image_blocks:
+        return full_text or "收到一条无法处理的消息"
+
+    # 有图片 → 构建多模态 content 数组
+    content = []
+    if full_text:
+        content.append({"type": "text", "text": full_text})
+    content.extend(image_blocks)
+    return content
+
+
 async def main():
     async with aiohttp.ClientSession() as session:
         # 1. 获取二维码并等待扫码
@@ -647,12 +749,19 @@ async def main():
             get_updates_buf = result.get("get_updates_buf") or get_updates_buf
 
             for msg in result.get("msgs") or []:
-                if msg.get("message_type") != 1:
-                    continue
-                text = msg.get("item_list", [{}])[0].get("text_item", {}).get("text", "")
+                item_list = msg.get("item_list", [])
+                # 提取第一个文本 item 的文字，用于命令匹配
+                text = ""
+                for item in item_list:
+                    if item.get("type") == 1:
+                        text = item.get("text_item", {}).get("text", "")
+                        break
                 from_id = msg["from_user_id"]
                 context_token = msg["context_token"]
-                print(f"收到消息: {text}")
+                # 日志：打印消息包含的内容类型
+                item_types = [item.get("type") for item in item_list]
+                preview = text[:50] if text else f"(非文本消息, types={item_types})"
+                print(f"收到消息: {preview}")
 
                 # 更新最近联系人（定时器任务用于发通知）
                 last_contact["from_id"] = from_id
@@ -747,10 +856,11 @@ async def main():
                         bot_base_url_ref[0] or None,
                     )
 
-                # 调用 AI
+                # 调用 AI（支持文字、图片、语音）
                 loop = asyncio.get_event_loop()
-                # 或者替换为你自已要用的接口
-                reply = await loop.run_in_executor(executor, ai.chat, text)
+                provider = _raw_cfg.get("provider", "deepseek")
+                ai_content = await build_ai_content(session, item_list, provider)
+                reply = await loop.run_in_executor(executor, ai.chat, ai_content)
 
                 # sendmessage（补全 SDK 所需字段）
                 client_id = f"openclaw-weixin-{random.randint(0, 0xFFFFFFFF):08x}"

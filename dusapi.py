@@ -33,6 +33,14 @@ class DusAPI:
         self.base_url = config.base_url.rstrip('/')
 
     def chat(self, message, model=None, stream=False, prompt=None, history=None):
+        """发送消息给 AI。
+
+        Args:
+            message: 纯文本字符串（向后兼容）或多模态 content 数组
+                     [{"type": "text", "text": "..."},
+                      {"type": "image", "source": {"type": "base64",
+                          "media_type": "image/jpeg", "data": "..."}}]
+        """
         if model is None:
             model = self.DS_NOW_MOD
         if prompt is None:
@@ -52,7 +60,9 @@ class DusAPI:
                 t = h.get('time', '')
                 content = f"[{t}] {h.get('content', '')}" if t else h.get('content', '')
                 messages.append({"role": role, "content": content})
-        messages.append({"role": "user", "content": message})
+        # 支持纯文本字符串 和 多模态 content 数组
+        user_content = message if isinstance(message, (str, list)) else str(message)
+        messages.append({"role": "user", "content": user_content})
         payload = {
             "model": model,
             "max_tokens": 1024,

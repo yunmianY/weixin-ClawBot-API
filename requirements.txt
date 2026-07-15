@@ -1,6 +1,10 @@
 aiohttp>=3.9.0
 requests>=2.31.0
 qrcode[pil]>=7.4.2
+pycryptodome>=3.20.0
+
+# Optional: for SILK voice decoding (WeChat voice messages)
+# pilk
 
 # Optional: only needed when building an executable from bot.spec.
 pyinstaller>=6.0.0
