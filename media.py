@@ -199,6 +199,7 @@ def build_image_block_openai(mime_type: str, b64_data: str) -> dict:
     }
 
 
+
 def build_image_block_anthropic(mime_type: str, b64_data: str) -> dict:
     """构建 Anthropic 兼容的 image content block（裸 base64，不带前缀）。"""
     return {
